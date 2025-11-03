@@ -6,6 +6,7 @@ import redis from "redis";
 import Groq from "groq-sdk";
 import dotenv from "dotenv";
 import { Credentials } from "google-auth-library";
+import { parseDesiredEmailCount } from "./src/utils/query";
 
 dotenv.config();
 
@@ -372,8 +373,12 @@ app.post("/api/chat", async (req: Request, res: Response) => {
       }
 
       const cacheKey = `emails:${userEmail}`;
+      const { count: desiredCount, wantsMore } = parseDesiredEmailCount(
+        message,
+        { fallback: 20, min: 5, max: 200 }
+      );
       const shouldForce =
-        Boolean(forceRefreshEmails) || wantsFreshEmails(message);
+        Boolean(forceRefreshEmails) || wantsFreshEmails(message) || wantsMore;
 
       const { q } = buildGmailQueryFromMessage(message);
       if (q) {
@@ -400,19 +405,41 @@ app.post("/api/chat", async (req: Request, res: Response) => {
         }
       } else {
         // Fallback to recent emails
+        const countScopedKey = `${cacheKey}:n:${desiredCount}`;
         const cachedEmails = shouldForce
           ? null
-          : await redisClient.get(cacheKey);
+          : await redisClient.get(countScopedKey);
         if (cachedEmails) {
-          console.log("Using cached emails from Redis");
-          emailContext = JSON.parse(cachedEmails) as Email[];
+          const parsed = JSON.parse(cachedEmails) as Email[];
+          if (parsed.length >= desiredCount) {
+            console.log("Using cached emails from Redis");
+            emailContext = parsed;
+          } else {
+            console.log(
+              "Cached emails less than desired count, refetching recent",
+              desiredCount
+            );
+            const { emails, total } = await fetchGmailEmails(
+              req.session.tokens.access_token!,
+              { perPage: desiredCount, totalLimit: desiredCount }
+            );
+            await redisClient.setEx(
+              countScopedKey,
+              900,
+              JSON.stringify(emails)
+            );
+            emailContext = emails as Email[];
+            systemMetaNotes.push(
+              `Loaded recent emails (showing ${emails.length} of ~${total}).`
+            );
+          }
         } else {
           console.log("Fetching fresh emails from Gmail API (recent)");
           const { emails, total } = await fetchGmailEmails(
             req.session.tokens.access_token!,
-            { perPage: 50, totalLimit: 100 }
+            { perPage: desiredCount, totalLimit: desiredCount }
           );
-          await redisClient.setEx(cacheKey, 900, JSON.stringify(emails));
+          await redisClient.setEx(countScopedKey, 900, JSON.stringify(emails));
           emailContext = emails as Email[];
           systemMetaNotes.push(
             `Loaded recent emails (showing ${emails.length} of ~${total}).`
@@ -441,7 +468,7 @@ Formatting rules:
       `- [Unread 📩] From — Subject (Date)` +
       "`" +
       `
-- Show at most 10 items unless the user asks for more. If there are more, say how many are hidden and how to request them.
+- Show at most 20 items by default. For requests like "recent/latest emails", list up to 20 items. If there are more than 20, say how many are hidden and how to request them.
 - If the request is ambiguous, ask a brief clarifying question before proceeding.
 
 Constraints:
@@ -463,7 +490,7 @@ Constraints:
             `Email ${idx + 1}:
 From: ${email.from}
 Subject: ${email.subject}
-Date: ${email.date}
+Date: ${new Date(email.date).toLocaleString()}
 Status: ${email.isUnread ? "Unread 📩" : "Read 📧"}
 Preview: ${email.snippet}`
         )
@@ -476,7 +503,7 @@ Here are the user's recent emails for context:
 ${formattedEmails}
 
 Follow the adaptive behavior described above to answer the user's request appropriately.
-If not relevant, summarize or ignore unnecessary data. Format responses cleanly and intuitively.
+When listing emails, include up to 20 items from the provided context unless the user specifies a different number. Format responses cleanly and intuitively.
       `;
     }
 

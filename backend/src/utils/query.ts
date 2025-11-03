@@ -77,4 +77,19 @@ export function buildGmailQueryFromMessage(message: string): { q: string | null;
   return { q: q.length ? q : null, reason: q.length ? 'derived from user message' : null };
 }
 
+// Extract desired email count and whether the user asked for "more"
+export function parseDesiredEmailCount(message: string, defaults: { fallback: number; min?: number; max?: number } = { fallback: 20 }): { count: number; wantsMore: boolean } {
+  const min = Math.max(1, defaults.min ?? 5);
+  const max = Math.min(500, defaults.max ?? 200);
+  const m = message.toLowerCase();
 
+  // Common patterns: "show 25", "25 emails", "top 20", "list 100"
+  const numMatch = m.match(/\b(\d{1,3})\b\s*(?:emails?|msgs?|messages?)?/);
+  let count = defaults.fallback;
+  if (numMatch) {
+    count = Math.min(Math.max(parseInt(numMatch[1], 10), min), max);
+  }
+
+  const wantsMore = /(more|show more|next|load more)/.test(m);
+  return { count, wantsMore };
+}

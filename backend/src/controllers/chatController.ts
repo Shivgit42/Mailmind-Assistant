@@ -5,6 +5,7 @@ import {
   buildGmailQueryFromMessage,
   isGmailQuery,
   wantsFreshEmails,
+  parseDesiredEmailCount,
 } from "../utils/query";
 import { buildSystemPrompt } from "../utils/prompt";
 
@@ -33,8 +34,12 @@ export async function chatHandler(req: Request, res: Response) {
       }
 
       const cacheKey = `emails:${userEmail}`;
+      const { count: desiredCount, wantsMore } = parseDesiredEmailCount(
+        message,
+        { fallback: 20, min: 5, max: 200 }
+      );
       const shouldForce =
-        Boolean(forceRefreshEmails) || wantsFreshEmails(message);
+        Boolean(forceRefreshEmails) || wantsFreshEmails(message) || wantsMore;
 
       const { q } = buildGmailQueryFromMessage(message);
       if (q) {
@@ -61,21 +66,44 @@ export async function chatHandler(req: Request, res: Response) {
           );
         }
       } else {
+        const countScopedKey = `${cacheKey}:n:${desiredCount}`;
         const cachedEmails = shouldForce
           ? null
-          : await redisClient.get(cacheKey);
+          : await redisClient.get(countScopedKey);
         if (cachedEmails) {
-          if (process.env.NODE_ENV !== "production")
-            console.log("Using cached emails from Redis");
-          emailContext = JSON.parse(cachedEmails) as Email[];
+          const parsed = JSON.parse(cachedEmails) as Email[];
+          if (parsed.length >= desiredCount) {
+            if (process.env.NODE_ENV !== "production")
+              console.log("Using cached emails from Redis");
+            emailContext = parsed;
+          } else {
+            if (process.env.NODE_ENV !== "production")
+              console.log(
+                "Cached emails less than desired count, refetching recent",
+                desiredCount
+              );
+            const { emails, total } = await fetchGmailEmails(
+              req.session.tokens.access_token!,
+              { perPage: desiredCount, totalLimit: desiredCount }
+            );
+            await redisClient.setEx(
+              countScopedKey,
+              900,
+              JSON.stringify(emails)
+            );
+            emailContext = emails as Email[];
+            systemMetaNotes.push(
+              `Loaded recent emails (showing ${emails.length} of ~${total}).`
+            );
+          }
         } else {
           if (process.env.NODE_ENV !== "production")
             console.log("Fetching fresh emails from Gmail API (recent)");
           const { emails, total } = await fetchGmailEmails(
             req.session.tokens.access_token!,
-            { perPage: 50, totalLimit: 100 }
+            { perPage: desiredCount, totalLimit: desiredCount }
           );
-          await redisClient.setEx(cacheKey, 900, JSON.stringify(emails));
+          await redisClient.setEx(countScopedKey, 900, JSON.stringify(emails));
           emailContext = emails as Email[];
           systemMetaNotes.push(
             `Loaded recent emails (showing ${emails.length} of ~${total}).`
@@ -96,7 +124,7 @@ export async function chatHandler(req: Request, res: Response) {
             `Email ${idx + 1}:
 From: ${email.from}
 Subject: ${email.subject}
-Date: ${email.date}
+Date: ${new Date(email.date).toLocaleString()}
 Status: ${email.isUnread ? "Unread 📩" : "Read 📧"}
 Preview: ${email.snippet}`
         )
@@ -109,7 +137,7 @@ Here are the user's recent emails for context:
 ${formattedEmails}
 
 Follow the adaptive behavior described above to answer the user's request appropriately.
-If not relevant, summarize or ignore unnecessary data. Format responses cleanly and intuitively.
+When listing emails, include up to 20 items from the provided context unless the user specifies a different number. Format responses cleanly and intuitively.
       `;
     }
 
