@@ -1,0 +1,543 @@
+// server.ts
+import express, { Request, Response } from "express";
+import cors from "cors";
+import session from "express-session";
+import { google } from "googleapis";
+import redis from "redis";
+import Groq from "groq-sdk";
+import dotenv from "dotenv";
+import { Credentials } from "google-auth-library";
+
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Extend Express Session to include custom properties
+declare module "express-session" {
+  interface SessionData {
+    tokens?: Credentials;
+    email?: string;
+    chatHistory?: Array<{
+      role: "system" | "user" | "assistant";
+      content: string;
+    }>;
+  }
+}
+
+// Email interface
+interface Email {
+  id: string;
+  subject: string;
+  from: string;
+  date: string;
+  snippet: string;
+  body: string;
+  isUnread: boolean;
+}
+
+// Redis client setup
+const redisClient = redis.createClient({
+  url: process.env.REDIS_URL || "redis://localhost:6379",
+});
+
+redisClient.connect().catch(console.error);
+
+// Middleware
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+    credentials: true,
+  })
+);
+app.use(express.json());
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET || "keepitsecret",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      secure: process.env.NODE_ENV === "production",
+      httpOnly: true,
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    },
+  })
+);
+
+// Initialize Groq client
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
+});
+
+// Google OAuth2 client
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  process.env.GOOGLE_REDIRECT_URI || "http://localhost:3000/api/auth/callback"
+);
+
+// Helper function to check if message is Gmail-related
+function isGmailQuery(message: string): boolean {
+  const gmailKeywords = [
+    "email",
+    "emails",
+    "gmail",
+    "inbox",
+    "message",
+    "messages",
+    "unread",
+    "latest",
+    "recent",
+    "mail",
+    "sender",
+    "from",
+    "subject",
+    "received",
+    "yesterday",
+    "today",
+    "week",
+  ];
+
+  const lowerMessage = message.toLowerCase();
+  return gmailKeywords.some((keyword) => lowerMessage.includes(keyword));
+}
+
+// Helper to detect requests for fresh emails (force refresh intent)
+function wantsFreshEmails(message: string): boolean {
+  const lower = message.toLowerCase();
+  const refreshKeywords = [
+    "refresh",
+    "latest",
+    "fetch again",
+    "update",
+    "check now",
+    "get new",
+    "most recent",
+    "just now",
+  ];
+  return refreshKeywords.some((k) => lower.includes(k));
+}
+
+// Helper function to determine query type
+function getQueryType(message: string): "summary" | "detail" | "search" {
+  const lowerMessage = message.toLowerCase();
+
+  // Summary keywords
+  const summaryKeywords = [
+    "summarize",
+    "summary",
+    "overview",
+    "brief",
+    "quick look",
+    "what's new",
+    "catch me up",
+    "what did i miss",
+  ];
+
+  // Search/specific keywords
+  const searchKeywords = [
+    "from",
+    "about",
+    "regarding",
+    "find",
+    "search",
+    "show me emails from",
+    "boss",
+    "manager",
+    "specific",
+  ];
+
+  if (summaryKeywords.some((keyword) => lowerMessage.includes(keyword))) {
+    return "summary";
+  }
+
+  if (searchKeywords.some((keyword) => lowerMessage.includes(keyword))) {
+    return "search";
+  }
+
+  return "detail";
+}
+
+// Helper function to fetch emails from Gmail
+type FetchedEmails = { emails: Email[]; total: number };
+
+async function fetchGmailEmails(
+  accessToken: string,
+  opts?: { q?: string; perPage?: number; totalLimit?: number }
+): Promise<FetchedEmails> {
+  oauth2Client.setCredentials({ access_token: accessToken });
+  const gmail = google.gmail({ version: "v1", auth: oauth2Client });
+
+  try {
+    // Paginate across results to support wider ranges
+    const perPage = Math.min(Math.max(opts?.perPage ?? 50, 10), 100);
+    const totalLimit = Math.min(Math.max(opts?.totalLimit ?? 300, 50), 1000);
+    let pageToken: string | undefined = undefined;
+    let collected: string[] = [];
+    let totalSeen = 0;
+
+    do {
+      const gmailListResponse = (await gmail.users.messages.list({
+        userId: "me",
+        maxResults: perPage,
+        q: opts?.q ?? "",
+        pageToken,
+      })) as any;
+
+      const msgs = (gmailListResponse.data?.messages || []) as Array<{
+        id?: string | null;
+      }>;
+      totalSeen += msgs.length;
+      collected.push(...msgs.map((m) => m.id!).filter(Boolean));
+      pageToken = gmailListResponse.data?.nextPageToken || undefined;
+    } while (pageToken && collected.length < totalLimit);
+
+    // Fetch full details for each collected email (bounded by totalLimit)
+    const limitedIds = collected.slice(0, totalLimit);
+    const emailPromises = limitedIds.map(async (id) => {
+      const email = await gmail.users.messages.get({
+        userId: "me",
+        id,
+        format: "full",
+      });
+
+      const headers = email.data.payload?.headers || [];
+      const subject =
+        headers.find((h) => h.name === "Subject")?.value || "No Subject";
+      const from = headers.find((h) => h.name === "From")?.value || "Unknown";
+      const date = headers.find((h) => h.name === "Date")?.value || "";
+
+      let body = "";
+      if (email.data.payload?.body?.data) {
+        body = Buffer.from(email.data.payload.body.data, "base64").toString(
+          "utf-8"
+        );
+      } else if (email.data.payload?.parts) {
+        const textPart = email.data.payload.parts.find(
+          (part) => part.mimeType === "text/plain"
+        );
+        if (textPart?.body?.data) {
+          body = Buffer.from(textPart.body.data, "base64").toString("utf-8");
+        }
+      }
+
+      return {
+        id,
+        subject,
+        from,
+        date,
+        snippet: email.data.snippet || "",
+        body: body.substring(0, 500),
+        isUnread: email.data.labelIds?.includes("UNREAD") || false,
+      } as Email;
+    });
+
+    const emails = await Promise.all(emailPromises);
+    return { emails, total: totalSeen };
+  } catch (error) {
+    console.error("Error fetching Gmail emails:", error);
+    throw error;
+  }
+}
+// Build a Gmail search query from natural language message
+function buildGmailQueryFromMessage(message: string): {
+  q: string | null;
+  reason: string | null;
+} {
+  const m = message.toLowerCase();
+  let parts: string[] = [];
+
+  // Year detection
+  const yearMatch = m.match(/\b(20\d{2})\b/);
+  if (yearMatch) {
+    const year = parseInt(yearMatch[1], 10);
+    const nextYear = year + 1;
+    parts.push(`after:${year}/01/01 before:${nextYear}/01/01`);
+  }
+
+  // Sender detection: phrases like "from X", "emails from X"
+  const fromMatch = m.match(
+    /(?:emails?\s+)?from\s+([a-z0-9._%+-@]+(?:\.[a-z0-9-]+)*|[a-z]+(?:\s+[a-z]+){0,3})/
+  );
+  if (fromMatch) {
+    const senderRaw = fromMatch[1].replace(/[^a-z0-9@._-\s]/g, "").trim();
+    // If looks like a domain/email, use domain; else use words
+    if (senderRaw.includes("@") || senderRaw.includes(".")) {
+      const domain = senderRaw.split("@")[1] || senderRaw;
+      parts.push(`from:${domain}`);
+    } else {
+      parts.push(`from:${senderRaw.replace(/\s+/g, "")}`);
+    }
+  }
+
+  // Simple keyword capture after "about" or "regarding"
+  const aboutMatch = m.match(/(?:about|regarding)\s+([\w\s]{3,50})/);
+  if (aboutMatch) {
+    const kw = aboutMatch[1].trim().replace(/\s+/g, " ");
+    parts.push(`{${kw}}`); // Gmail treats words; braces just group logically for us
+  }
+
+  // Intent: "unread"
+  if (m.includes("unread")) parts.push("is:unread");
+
+  // If asking for recent/latest/today/yesterday, bias recency with newer_than
+  if (/today|latest|recent|this week|yesterday|now/.test(m)) {
+    if (m.includes("yesterday")) parts.push("newer_than:2d");
+    else if (m.includes("week")) parts.push("newer_than:7d");
+    else parts.push("newer_than:1d");
+  }
+
+  const q = parts.join(" ").trim();
+  return {
+    q: q.length ? q : null,
+    reason: q.length ? "derived from user message" : null,
+  };
+}
+
+// Routes
+
+// Auth status check
+app.get("/api/auth/status", (req: Request, res: Response) => {
+  res.json({
+    authenticated: !!req.session.tokens,
+    email: req.session.email,
+  });
+});
+
+// Gmail OAuth - Start
+app.get("/api/auth/gmail", (req: Request, res: Response) => {
+  const authUrl = oauth2Client.generateAuthUrl({
+    access_type: "offline",
+    scope: [
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/userinfo.email",
+    ],
+  });
+  res.redirect(authUrl);
+});
+
+// Gmail OAuth - Callback
+app.get("/api/auth/callback", async (req: Request, res: Response) => {
+  const { code } = req.query;
+
+  if (!code || typeof code !== "string") {
+    return res.redirect(
+      `${process.env.FRONTEND_URL || "http://localhost:5173"}?error=no_code`
+    );
+  }
+
+  try {
+    const { tokens } = await oauth2Client.getToken(code);
+    req.session.tokens = tokens;
+
+    // Get user email
+    oauth2Client.setCredentials(tokens);
+    const oauth2 = google.oauth2({ version: "v2", auth: oauth2Client });
+    const userInfo = await oauth2.userinfo.get();
+    req.session.email = userInfo.data.email || undefined;
+
+    res.redirect(process.env.FRONTEND_URL || "http://localhost:5173");
+  } catch (error) {
+    console.error("Error during OAuth callback:", error);
+    res.redirect(
+      `${process.env.FRONTEND_URL || "http://localhost:5173"}?error=auth_failed`
+    );
+  }
+});
+
+// Logout
+app.post("/api/auth/logout", (req: Request, res: Response) => {
+  req.session.destroy((err) => {
+    if (err) {
+      console.error("Error destroying session:", err);
+      return res.status(500).json({ error: "Failed to logout" });
+    }
+    res.json({ success: true });
+  });
+});
+
+// Main chat endpoint
+app.post("/api/chat", async (req: Request, res: Response) => {
+  const { message, forceRefreshEmails } = req.body as {
+    message?: string;
+    forceRefreshEmails?: boolean;
+  };
+  if (!message) {
+    return res.status(400).json({ error: "Message is required" });
+  }
+
+  try {
+    let emailContext: Email[] | null = null;
+    let usedGmail = false;
+    const userEmail = req.session.email;
+    const systemMetaNotes: string[] = [];
+
+    // Detect Gmail-related queries
+    if (isGmailQuery(message)) {
+      if (!req.session.tokens) {
+        return res.status(401).json({
+          error: "Please connect your Gmail account first",
+          needsAuth: true,
+        });
+      }
+
+      const cacheKey = `emails:${userEmail}`;
+      const shouldForce =
+        Boolean(forceRefreshEmails) || wantsFreshEmails(message);
+
+      // Try to derive a targeted Gmail search query
+      const { q } = buildGmailQueryFromMessage(message);
+      if (q) {
+        const qHash = encodeURIComponent(q);
+        const queryCacheKey = `${cacheKey}:q:${qHash}`;
+        const cachedQueryEmails = shouldForce
+          ? null
+          : await redisClient.get(queryCacheKey);
+        if (cachedQueryEmails) {
+          console.log("Using cached query emails from Redis", q);
+          emailContext = JSON.parse(cachedQueryEmails) as Email[];
+        } else {
+          console.log("Fetching query-filtered emails from Gmail API", q);
+          const { emails, total } = await fetchGmailEmails(
+            req.session.tokens.access_token!,
+            { q, perPage: 100, totalLimit: 500 }
+          );
+          await redisClient.setEx(queryCacheKey, 900, JSON.stringify(emails));
+          emailContext = emails as Email[];
+          // Defer system note until after systemPrompt is initialized
+          systemMetaNotes.push(
+            `Search matched ~${total} messages (showing up to ${emails.length}).`
+          );
+        }
+      } else {
+        // Fallback to recent emails (no specific query)
+        const cachedEmails = shouldForce
+          ? null
+          : await redisClient.get(cacheKey);
+        if (cachedEmails) {
+          console.log("Using cached emails from Redis");
+          emailContext = JSON.parse(cachedEmails) as Email[];
+        } else {
+          console.log("Fetching fresh emails from Gmail API (recent)");
+          const { emails, total } = await fetchGmailEmails(
+            req.session.tokens.access_token!,
+            { perPage: 50, totalLimit: 100 }
+          );
+          await redisClient.setEx(cacheKey, 900, JSON.stringify(emails)); // 15 min TTL
+          emailContext = emails as Email[];
+          systemMetaNotes.push(
+            `Loaded recent emails (showing ${emails.length} of ~${total}).`
+          );
+        }
+      }
+
+      usedGmail = true;
+    }
+
+    // 🧠 Smart prompt logic
+    let systemPrompt =
+      `
+You are a helpful Gmail-savvy assistant. When email context is provided, answer using it exactly (do not invent emails). If no email context is relevant, answer normally.
+
+Core behavior (choose based on the user's intent):
+- Summary: Provide a brief overview first (total emails, unread count, top senders, key subjects, time range). Keep it concise and scannable.
+- Specific/search: Show only matching emails. Prefer a compact list with From, Subject, Date, and an unread badge.
+- Status (unread/read/recent): List those emails only.
+- Trends/analysis: Highlight patterns (frequent senders, common topics, busy days) and provide short, actionable takeaways.
+
+Formatting rules:
+- Start with a short title line that describes what you did (e.g., "Inbox summary" or "Emails from Alice").
+- Use clear sections and bullet points. Keep paragraphs short. Use emojis sparingly for clarity (e.g., 📬 for inbox, 🔎 for search, 📈 for trends).
+- For email lists, use a compact markdown list like: ` +
+      "`" +
+      `- [Unread 📩] From — Subject (Date)` +
+      "`" +
+      `
+- Show at most 10 items unless the user asks for more. If there are more, say how many are hidden and how to request them.
+- If the request is ambiguous, ask a brief clarifying question before proceeding.
+
+Constraints:
+- Only use the provided email context. Never fabricate senders, subjects, or dates.
+- If no relevant emails are found, say so clearly and suggest a next step (e.g., adjust date/sender/keywords).
+- Keep responses focused and avoid dumping raw data unless explicitly requested.
+    `;
+
+    if (systemMetaNotes.length) {
+      systemPrompt += `\n\n${systemMetaNotes.join("\n")}`;
+    }
+
+    let userPrompt = message;
+
+    if (emailContext) {
+      const formattedEmails = emailContext
+        .map(
+          (email, idx) =>
+            `Email ${idx + 1}:
+From: ${email.from}
+Subject: ${email.subject}
+Date: ${email.date}
+Status: ${email.isUnread ? "Unread 📩" : "Read 📧"}
+Preview: ${email.snippet}`
+        )
+        .join("\n\n");
+
+      userPrompt = `
+User request: "${message}"
+
+Here are the user's recent emails for context:
+${formattedEmails}
+
+Follow the adaptive behavior described above to answer the user's request appropriately.
+If not relevant, summarize or ignore unnecessary data. Format responses cleanly and intuitively.
+      `;
+    }
+
+    // Conversation memory: include recent chat history from session
+    if (!req.session.chatHistory) {
+      req.session.chatHistory = [];
+    }
+
+    // Build messages for the model: system + recent history + current user
+    const MAX_HISTORY_MESSAGES = 10; // number of prior messages to include
+    const recentHistory = req.session.chatHistory.slice(-MAX_HISTORY_MESSAGES);
+    const messagesForModel: Array<{
+      role: "system" | "user" | "assistant";
+      content: string;
+    }> = [
+      { role: "system", content: systemPrompt.trim() },
+      ...recentHistory,
+      { role: "user", content: userPrompt.trim() },
+    ];
+
+    // Call Groq API
+    const chatCompletion = await groq.chat.completions.create({
+      messages: messagesForModel,
+      model: "llama-3.3-70b-versatile",
+      temperature: 0.7,
+      max_tokens: 1024,
+    });
+
+    const assistantMessage = chatCompletion.choices[0]?.message?.content || "";
+
+    // Persist conversation: append the latest user and assistant turns
+    req.session.chatHistory.push(
+      { role: "user", content: userPrompt.trim() },
+      { role: "assistant", content: assistantMessage }
+    );
+    // Keep chat history bounded
+    if (req.session.chatHistory.length > 50) {
+      req.session.chatHistory = req.session.chatHistory.slice(-50);
+    }
+
+    res.json({ response: assistantMessage, usedGmail });
+  } catch (error) {
+    console.error("Chat error:", error);
+    const errorMessage =
+      error instanceof Error ? error.message : "Failed to process message";
+    res.status(500).json({ error: errorMessage });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
