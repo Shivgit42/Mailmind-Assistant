@@ -21,7 +21,7 @@ export function Header({ isAuthenticated, onConnect }: HeaderProps) {
         {!isAuthenticated ? (
           <button
             onClick={onConnect}
-            className="flex items-center gap-2 bg-emerald-600 text-white px-3 py-1.5 rounded-md text-md font-medium hover:bg-emerald-700 transition-colors"
+            className="flex items-center gap-2 bg-emerald-600 text-white px-3 py-1.5 rounded-md text-md font-medium hover:bg-emerald-700 transition-colors cursor-pointer"
           >
             <Mail className="w-4 h-4" />
             Connect Gmail

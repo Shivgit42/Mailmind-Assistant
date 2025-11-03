@@ -46,7 +46,7 @@ export function InputBar({
             <button
               onClick={onSend}
               disabled={disabled || !input.trim()}
-              className="inline-flex items-center gap-2 bg-emerald-600 text-white px-3 py-2 rounded-lg text-md font-medium hover:bg-emerald-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="inline-flex items-center gap-2 bg-emerald-600 text-white px-3 py-2 rounded-lg text-md font-medium hover:bg-emerald-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
             >
               <Send className="w-4 h-4" />
               Send
