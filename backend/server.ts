@@ -1,4 +1,3 @@
-// server.ts
 import express, { Request, Response } from "express";
 import cors from "cors";
 import session from "express-session";
@@ -13,7 +12,6 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Extend Express Session to include custom properties
 declare module "express-session" {
   interface SessionData {
     tokens?: Credentials;
@@ -59,7 +57,7 @@ app.use(
     cookie: {
       secure: process.env.NODE_ENV === "production",
       httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      maxAge: 24 * 60 * 60 * 1000,
     },
   })
 );
@@ -102,7 +100,7 @@ function isGmailQuery(message: string): boolean {
   return gmailKeywords.some((keyword) => lowerMessage.includes(keyword));
 }
 
-// Helper to detect requests for fresh emails (force refresh intent)
+// Helper to detect requests for fresh emails
 function wantsFreshEmails(message: string): boolean {
   const lower = message.toLowerCase();
   const refreshKeywords = [
@@ -134,7 +132,6 @@ function getQueryType(message: string): "summary" | "detail" | "search" {
     "what did i miss",
   ];
 
-  // Search/specific keywords
   const searchKeywords = [
     "from",
     "about",
@@ -169,7 +166,7 @@ async function fetchGmailEmails(
   const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
   try {
-    // Paginate across results to support wider ranges
+    // Paginate across results
     const perPage = Math.min(Math.max(opts?.perPage ?? 50, 10), 100);
     const totalLimit = Math.min(Math.max(opts?.totalLimit ?? 300, 50), 1000);
     let pageToken: string | undefined = undefined;
@@ -192,7 +189,6 @@ async function fetchGmailEmails(
       pageToken = gmailListResponse.data?.nextPageToken || undefined;
     } while (pageToken && collected.length < totalLimit);
 
-    // Fetch full details for each collected email (bounded by totalLimit)
     const limitedIds = collected.slice(0, totalLimit);
     const emailPromises = limitedIds.map(async (id) => {
       const email = await gmail.users.messages.get({
@@ -239,7 +235,7 @@ async function fetchGmailEmails(
     throw error;
   }
 }
-// Build a Gmail search query from natural language message
+
 function buildGmailQueryFromMessage(message: string): {
   q: string | null;
   reason: string | null;
@@ -247,7 +243,6 @@ function buildGmailQueryFromMessage(message: string): {
   const m = message.toLowerCase();
   let parts: string[] = [];
 
-  // Year detection
   const yearMatch = m.match(/\b(20\d{2})\b/);
   if (yearMatch) {
     const year = parseInt(yearMatch[1], 10);
@@ -255,13 +250,12 @@ function buildGmailQueryFromMessage(message: string): {
     parts.push(`after:${year}/01/01 before:${nextYear}/01/01`);
   }
 
-  // Sender detection: phrases like "from X", "emails from X"
   const fromMatch = m.match(
     /(?:emails?\s+)?from\s+([a-z0-9._%+-@]+(?:\.[a-z0-9-]+)*|[a-z]+(?:\s+[a-z]+){0,3})/
   );
   if (fromMatch) {
     const senderRaw = fromMatch[1].replace(/[^a-z0-9@._-\s]/g, "").trim();
-    // If looks like a domain/email, use domain; else use words
+
     if (senderRaw.includes("@") || senderRaw.includes(".")) {
       const domain = senderRaw.split("@")[1] || senderRaw;
       parts.push(`from:${domain}`);
@@ -270,17 +264,14 @@ function buildGmailQueryFromMessage(message: string): {
     }
   }
 
-  // Simple keyword capture after "about" or "regarding"
   const aboutMatch = m.match(/(?:about|regarding)\s+([\w\s]{3,50})/);
   if (aboutMatch) {
     const kw = aboutMatch[1].trim().replace(/\s+/g, " ");
-    parts.push(`{${kw}}`); // Gmail treats words; braces just group logically for us
+    parts.push(`{${kw}}`);
   }
 
-  // Intent: "unread"
   if (m.includes("unread")) parts.push("is:unread");
 
-  // If asking for recent/latest/today/yesterday, bias recency with newer_than
   if (/today|latest|recent|this week|yesterday|now/.test(m)) {
     if (m.includes("yesterday")) parts.push("newer_than:2d");
     else if (m.includes("week")) parts.push("newer_than:7d");
@@ -356,7 +347,6 @@ app.post("/api/auth/logout", (req: Request, res: Response) => {
   });
 });
 
-// Main chat endpoint
 app.post("/api/chat", async (req: Request, res: Response) => {
   const { message, forceRefreshEmails } = req.body as {
     message?: string;
@@ -385,7 +375,6 @@ app.post("/api/chat", async (req: Request, res: Response) => {
       const shouldForce =
         Boolean(forceRefreshEmails) || wantsFreshEmails(message);
 
-      // Try to derive a targeted Gmail search query
       const { q } = buildGmailQueryFromMessage(message);
       if (q) {
         const qHash = encodeURIComponent(q);
@@ -404,13 +393,13 @@ app.post("/api/chat", async (req: Request, res: Response) => {
           );
           await redisClient.setEx(queryCacheKey, 900, JSON.stringify(emails));
           emailContext = emails as Email[];
-          // Defer system note until after systemPrompt is initialized
+
           systemMetaNotes.push(
             `Search matched ~${total} messages (showing up to ${emails.length}).`
           );
         }
       } else {
-        // Fallback to recent emails (no specific query)
+        // Fallback to recent emails
         const cachedEmails = shouldForce
           ? null
           : await redisClient.get(cacheKey);
@@ -423,7 +412,7 @@ app.post("/api/chat", async (req: Request, res: Response) => {
             req.session.tokens.access_token!,
             { perPage: 50, totalLimit: 100 }
           );
-          await redisClient.setEx(cacheKey, 900, JSON.stringify(emails)); // 15 min TTL
+          await redisClient.setEx(cacheKey, 900, JSON.stringify(emails));
           emailContext = emails as Email[];
           systemMetaNotes.push(
             `Loaded recent emails (showing ${emails.length} of ~${total}).`
@@ -434,7 +423,6 @@ app.post("/api/chat", async (req: Request, res: Response) => {
       usedGmail = true;
     }
 
-    // 🧠 Smart prompt logic
     let systemPrompt =
       `
 You are a helpful Gmail-savvy assistant. When email context is provided, answer using it exactly (do not invent emails). If no email context is relevant, answer normally.
@@ -492,13 +480,11 @@ If not relevant, summarize or ignore unnecessary data. Format responses cleanly 
       `;
     }
 
-    // Conversation memory: include recent chat history from session
     if (!req.session.chatHistory) {
       req.session.chatHistory = [];
     }
 
-    // Build messages for the model: system + recent history + current user
-    const MAX_HISTORY_MESSAGES = 10; // number of prior messages to include
+    const MAX_HISTORY_MESSAGES = 10;
     const recentHistory = req.session.chatHistory.slice(-MAX_HISTORY_MESSAGES);
     const messagesForModel: Array<{
       role: "system" | "user" | "assistant";
@@ -509,22 +495,90 @@ If not relevant, summarize or ignore unnecessary data. Format responses cleanly 
       { role: "user", content: userPrompt.trim() },
     ];
 
-    // Call Groq API
-    const chatCompletion = await groq.chat.completions.create({
-      messages: messagesForModel,
-      model: "llama-3.3-70b-versatile",
-      temperature: 0.7,
-      max_tokens: 1024,
-    });
+    async function summarizeInChunks(
+      emails: Email[],
+      userMessage: string
+    ): Promise<string> {
+      const CHUNK_SIZE = 30;
+      const chunks: Email[][] = [];
+      for (let i = 0; i < emails.length; i += CHUNK_SIZE) {
+        chunks.push(emails.slice(i, i + CHUNK_SIZE));
+      }
 
-    const assistantMessage = chatCompletion.choices[0]?.message?.content || "";
+      const partialSummaries: string[] = [];
+      for (const chunk of chunks) {
+        const chunkFormatted = chunk
+          .map(
+            (email, idx) =>
+              `Email ${idx + 1}:\nFrom: ${email.from}\nSubject: ${
+                email.subject
+              }\nDate: ${email.date}\nStatus: ${
+                email.isUnread ? "Unread 📩" : "Read 📧"
+              }\nPreview: ${email.snippet}`
+          )
+          .join("\n\n");
 
-    // Persist conversation: append the latest user and assistant turns
+        const chunkMessages = [
+          { role: "system", content: (systemPrompt || "").trim() },
+          {
+            role: "user",
+            content:
+              `You will receive a portion of the user's emails. Create a concise intermediate summary optimized for later merging.\n- Keep it under 8 bullet points.\n- Include counts (unread/read) and notable senders/subjects.\n- Output only the summary, no preface.\n\nUser request: "${userMessage}"\n\nEmails:\n${chunkFormatted}`.trim(),
+          },
+        ];
+
+        const chunkResp = await groq.chat.completions.create({
+          messages: chunkMessages as any,
+          model: "llama-3.3-70b-versatile",
+          temperature: 0.4,
+          max_tokens: 400,
+        });
+        partialSummaries.push(
+          chunkResp.choices[0]?.message?.content?.trim() || ""
+        );
+
+        await new Promise((r) => setTimeout(r, 300));
+      }
+
+      const mergeMessages = [
+        { role: "system", content: (systemPrompt || "").trim() },
+        {
+          role: "user",
+          content:
+            `Combine the following partial email summaries into a single answer to the user's request.\n- Do not repeat items verbatim; deduplicate.\n- Follow the formatting rules previously provided.\n- Limit lists to 10 items unless asked.\n\nUser request: "${userMessage}"\n\nPartial summaries:\n${partialSummaries
+              .map((s, i) => `Summary ${i + 1}:\n${s}`)
+              .join("\n\n")}`.trim(),
+        },
+      ];
+
+      const merged = await groq.chat.completions.create({
+        messages: mergeMessages as any,
+        model: "llama-3.3-70b-versatile",
+        temperature: 0.5,
+        max_tokens: 800,
+      });
+      return merged.choices[0]?.message?.content || "";
+    }
+
+    let assistantMessage: string;
+    const LARGE_EMAIL_THRESHOLD = 120;
+    if (emailContext && emailContext.length > LARGE_EMAIL_THRESHOLD) {
+      assistantMessage = await summarizeInChunks(emailContext, message);
+    } else {
+      const chatCompletion = await groq.chat.completions.create({
+        messages: messagesForModel,
+        model: "llama-3.3-70b-versatile",
+        temperature: 0.7,
+        max_tokens: 1024,
+      });
+      assistantMessage = chatCompletion.choices[0]?.message?.content || "";
+    }
+
     req.session.chatHistory.push(
       { role: "user", content: userPrompt.trim() },
       { role: "assistant", content: assistantMessage }
     );
-    // Keep chat history bounded
+
     if (req.session.chatHistory.length > 50) {
       req.session.chatHistory = req.session.chatHistory.slice(-50);
     }
