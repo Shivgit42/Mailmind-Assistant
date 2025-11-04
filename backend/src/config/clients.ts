@@ -1,13 +1,20 @@
+import dotenv from "dotenv";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Load .env from backend root directory
+dotenv.config({ path: join(__dirname, "../../.env") });
+
 import { google } from "googleapis";
 import { Redis } from "@upstash/redis";
 import Groq from "groq-sdk";
 
 // Upstash Redis client with a tiny adapter to match our current API (get, setEx)
 const upstashRedis = new Redis({
-  url:
-    process.env.UPSTASH_REDIS_REST_URL ||
-    process.env.REDIS_URL ||
-    "",
+  url: process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_URL || "",
   token: process.env.UPSTASH_REDIS_REST_TOKEN || process.env.REDIS_TOKEN || "",
 });
 
@@ -26,5 +33,3 @@ export const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_SECRET,
   process.env.GOOGLE_REDIRECT_URI || "http://localhost:3000/api/auth/callback"
 );
-
-
