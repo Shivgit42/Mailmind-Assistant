@@ -28,10 +28,7 @@ function Chat() {
   ];
 
   const API_BASE =
-    (import.meta as any).env?.VITE_API_BASE ||
-    (typeof window !== "undefined"
-      ? `${window.location.origin.replace(/\/$/, "")}/api`
-      : "http://localhost:3000/api");
+    import.meta.env.VITE_API_BASE || "http://localhost:3000/api";
 
   useEffect(() => {
     scrollToBottom();
