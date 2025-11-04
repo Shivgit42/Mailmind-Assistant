@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { status, start, callback, logout } from "../controllers/authController";
+import { status, start, callback, logout } from "../controllers/authController.js";
 
 const router = Router();
 

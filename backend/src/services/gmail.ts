@@ -1,5 +1,5 @@
 import { google } from "googleapis";
-import { oauth2Client } from "../config/clients";
+import { oauth2Client } from "../config/clients.js";
 
 export interface Email {
   id: string;

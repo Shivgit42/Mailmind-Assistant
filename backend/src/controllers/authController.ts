@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { google } from "googleapis";
-import { oauth2Client } from "../config/clients";
+import { oauth2Client } from "../config/clients.js";
 
 export function status(req: Request, res: Response) {
   res.json({ authenticated: !!req.session.tokens, email: req.session.email });

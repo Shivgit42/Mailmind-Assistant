@@ -1,13 +1,13 @@
 import { Request, Response } from "express";
-import { groq, oauth2Client, redisClient } from "../config/clients";
-import { Email, fetchGmailEmails } from "../services/gmail";
+import { groq, oauth2Client, redisClient } from "../config/clients.js";
+import { Email, fetchGmailEmails } from "../services/gmail.js";
 import {
   buildGmailQueryFromMessage,
   isGmailQuery,
   wantsFreshEmails,
   parseDesiredEmailCount,
-} from "../utils/query";
-import { buildSystemPrompt } from "../utils/prompt";
+} from "../utils/query.js";
+import { buildSystemPrompt } from "../utils/prompt.js";
 
 export async function chatHandler(req: Request, res: Response) {
   const { message, forceRefreshEmails } = req.body as {
