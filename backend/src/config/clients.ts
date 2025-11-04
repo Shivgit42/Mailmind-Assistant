@@ -1,10 +1,21 @@
 import { google } from "googleapis";
-import redis from "redis";
+import { Redis } from "@upstash/redis";
 import Groq from "groq-sdk";
 
-export const redisClient = redis.createClient({
-  url: process.env.REDIS_URL || "redis://localhost:6379",
+// Upstash Redis client with a tiny adapter to match our current API (get, setEx)
+const upstashRedis = new Redis({
+  url:
+    process.env.UPSTASH_REDIS_REST_URL ||
+    process.env.REDIS_URL ||
+    "",
+  token: process.env.UPSTASH_REDIS_REST_TOKEN || process.env.REDIS_TOKEN || "",
 });
+
+export const redisClient = {
+  get: (key: string) => upstashRedis.get<string | null>(key),
+  setEx: (key: string, ttlSeconds: number, value: string) =>
+    upstashRedis.set(key, value, { ex: ttlSeconds }) as Promise<"OK" | null>,
+};
 
 export const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
