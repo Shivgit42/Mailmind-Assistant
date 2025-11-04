@@ -45,6 +45,8 @@ app.use(
   })
 );
 app.use(express.json());
+// Trust Render's proxy so secure cookies are respected
+app.set("trust proxy", 1);
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "keepitsecret",
@@ -52,6 +54,7 @@ app.use(
     saveUninitialized: false,
     cookie: {
       secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       httpOnly: true,
       maxAge: 24 * 60 * 60 * 1000,
     },
