@@ -15,6 +15,7 @@
   "license": "ISC",
   "description": "Gmail Chat Application with LLM Integration",
   "dependencies": {
+    "@upstash/redis": "^1.35.6",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
