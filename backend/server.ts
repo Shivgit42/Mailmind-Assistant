@@ -5,8 +5,8 @@ import { google } from "googleapis";
 import Groq from "groq-sdk";
 import dotenv from "dotenv";
 import { Credentials } from "google-auth-library";
-import { parseDesiredEmailCount } from "./src/utils/query";
-import { redisClient } from "./src/config/clients";
+import { parseDesiredEmailCount } from "./src/utils/query.js";
+import { redisClient } from "./src/config/clients.js";
 
 dotenv.config();
 
