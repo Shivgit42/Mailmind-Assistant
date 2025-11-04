@@ -2,11 +2,11 @@ import express, { Request, Response } from "express";
 import cors from "cors";
 import session from "express-session";
 import { google } from "googleapis";
-import redis from "redis";
 import Groq from "groq-sdk";
 import dotenv from "dotenv";
 import { Credentials } from "google-auth-library";
 import { parseDesiredEmailCount } from "./src/utils/query";
+import { redisClient } from "./src/config/clients";
 
 dotenv.config();
 
@@ -35,12 +35,7 @@ interface Email {
   isUnread: boolean;
 }
 
-// Redis client setup
-const redisClient = redis.createClient({
-  url: process.env.REDIS_URL || "redis://localhost:6379",
-});
-
-redisClient.connect().catch(console.error);
+// Redis client is provided by Upstash via src/config/clients
 
 // Middleware
 app.use(
