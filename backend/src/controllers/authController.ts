@@ -31,7 +31,6 @@ export async function callback(req: Request, res: Response) {
     req.session.email = userInfo.data.email || undefined;
     res.redirect(process.env.FRONTEND_URL || "http://localhost:5173");
   } catch (error) {
-    console.error("Error during OAuth callback:", error);
     res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}?error=auth_failed`);
   }
 }
@@ -39,7 +38,6 @@ export async function callback(req: Request, res: Response) {
 export function logout(req: Request, res: Response) {
   req.session.destroy((err) => {
     if (err) {
-      console.error("Error destroying session:", err);
       return res.status(500).json({ error: "Failed to logout" });
     }
     res.json({ success: true });
