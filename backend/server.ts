@@ -2,11 +2,10 @@ import express, { Request, Response } from "express";
 import cors from "cors";
 import session from "express-session";
 import { google } from "googleapis";
-import Groq from "groq-sdk";
 import dotenv from "dotenv";
 import { Credentials } from "google-auth-library";
 import { parseDesiredEmailCount } from "./src/utils/query.js";
-import { redisClient } from "./src/config/clients.js";
+import { redisClient, openai } from "./src/config/clients.js";
 
 dotenv.config();
 
@@ -35,8 +34,6 @@ interface Email {
   isUnread: boolean;
 }
 
-// Redis client is provided by Upstash via src/config/clients
-
 // Middleware
 app.use(
   cors({
@@ -45,7 +42,6 @@ app.use(
   })
 );
 app.use(express.json());
-// Trust Render's proxy so secure cookies are respected
 app.set("trust proxy", 1);
 app.use(
   session({
@@ -61,10 +57,7 @@ app.use(
   })
 );
 
-// Initialize Groq client
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
+// OpenRouter client is imported from config/clients
 
 // Google OAuth2 client
 const oauth2Client = new google.auth.OAuth2(
@@ -386,10 +379,12 @@ app.post("/api/chat", async (req: Request, res: Response) => {
           ? null
           : await redisClient.get(queryCacheKey);
         if (cachedQueryEmails) {
-          console.log("Using cached query emails from Redis", q);
-          emailContext = JSON.parse(cachedQueryEmails) as Email[];
+          const parsed =
+            typeof cachedQueryEmails === "string"
+              ? (JSON.parse(cachedQueryEmails) as Email[])
+              : (cachedQueryEmails as unknown as Email[]);
+          emailContext = parsed;
         } else {
-          console.log("Fetching query-filtered emails from Gmail API", q);
           const { emails, total } = await fetchGmailEmails(
             req.session.tokens.access_token!,
             { q, perPage: 100, totalLimit: 500 }
@@ -408,15 +403,13 @@ app.post("/api/chat", async (req: Request, res: Response) => {
           ? null
           : await redisClient.get(countScopedKey);
         if (cachedEmails) {
-          const parsed = JSON.parse(cachedEmails) as Email[];
+          const parsed =
+            typeof cachedEmails === "string"
+              ? (JSON.parse(cachedEmails) as Email[])
+              : (cachedEmails as unknown as Email[]);
           if (parsed.length >= desiredCount) {
-            console.log("Using cached emails from Redis");
             emailContext = parsed;
           } else {
-            console.log(
-              "Cached emails less than desired count, refetching recent",
-              desiredCount
-            );
             const { emails, total } = await fetchGmailEmails(
               req.session.tokens.access_token!,
               { perPage: desiredCount, totalLimit: desiredCount }
@@ -432,7 +425,6 @@ app.post("/api/chat", async (req: Request, res: Response) => {
             );
           }
         } else {
-          console.log("Fetching fresh emails from Gmail API (recent)");
           const { emails, total } = await fetchGmailEmails(
             req.session.tokens.access_token!,
             { perPage: desiredCount, totalLimit: desiredCount }
@@ -552,9 +544,9 @@ When listing emails, include up to 20 items from the provided context unless the
           },
         ];
 
-        const chunkResp = await groq.chat.completions.create({
+        const chunkResp = await openai.chat.completions.create({
           messages: chunkMessages as any,
-          model: "llama-3.3-70b-versatile",
+          model: process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini",
           temperature: 0.4,
           max_tokens: 400,
         });
@@ -576,9 +568,9 @@ When listing emails, include up to 20 items from the provided context unless the
         },
       ];
 
-      const merged = await groq.chat.completions.create({
+      const merged = await openai.chat.completions.create({
         messages: mergeMessages as any,
-        model: "llama-3.3-70b-versatile",
+        model: process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini",
         temperature: 0.5,
         max_tokens: 800,
       });
@@ -590,9 +582,9 @@ When listing emails, include up to 20 items from the provided context unless the
     if (emailContext && emailContext.length > LARGE_EMAIL_THRESHOLD) {
       assistantMessage = await summarizeInChunks(emailContext, message);
     } else {
-      const chatCompletion = await groq.chat.completions.create({
+      const chatCompletion = await openai.chat.completions.create({
         messages: messagesForModel,
-        model: "llama-3.3-70b-versatile",
+        model: process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini",
         temperature: 0.7,
         max_tokens: 1024,
       });
@@ -610,13 +602,10 @@ When listing emails, include up to 20 items from the provided context unless the
 
     res.json({ response: assistantMessage, usedGmail });
   } catch (error) {
-    console.error("Chat error:", error);
     const errorMessage =
       error instanceof Error ? error.message : "Failed to process message";
     res.status(500).json({ error: errorMessage });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+app.listen(PORT);
