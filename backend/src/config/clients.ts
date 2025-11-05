@@ -5,14 +5,12 @@ import { dirname, join } from "path";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Load .env from backend root directory
 dotenv.config({ path: join(__dirname, "../../.env") });
 
 import { google } from "googleapis";
 import { Redis } from "@upstash/redis";
-import Groq from "groq-sdk";
+import OpenAI from "openai";
 
-// Upstash Redis client with a tiny adapter to match our current API (get, setEx)
 const upstashRedis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_URL || "",
   token: process.env.UPSTASH_REDIS_REST_TOKEN || process.env.REDIS_TOKEN || "",
@@ -24,8 +22,17 @@ export const redisClient = {
     upstashRedis.set(key, value, { ex: ttlSeconds }) as Promise<"OK" | null>,
 };
 
-export const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
+export const openai = new OpenAI({
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: process.env.OPENROUTER_API_KEY,
+  defaultHeaders: {
+    ...(process.env.OPENROUTER_SITE_URL
+      ? { "HTTP-Referer": process.env.OPENROUTER_SITE_URL }
+      : {}),
+    ...(process.env.OPENROUTER_SITE_NAME
+      ? { "X-Title": process.env.OPENROUTER_SITE_NAME }
+      : {}),
+  },
 });
 
 export const oauth2Client = new google.auth.OAuth2(
