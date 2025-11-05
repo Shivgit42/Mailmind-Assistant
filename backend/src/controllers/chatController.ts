@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { groq, oauth2Client, redisClient } from "../config/clients.js";
+import { openai, oauth2Client, redisClient } from "../config/clients.js";
 import { Email, fetchGmailEmails } from "../services/gmail.js";
 import {
   buildGmailQueryFromMessage,
@@ -49,12 +49,12 @@ export async function chatHandler(req: Request, res: Response) {
           ? null
           : await redisClient.get(queryCacheKey);
         if (cachedQueryEmails) {
-          if (process.env.NODE_ENV !== "production")
-            console.log("Using cached query emails from Redis", q);
-          emailContext = JSON.parse(cachedQueryEmails) as Email[];
+          const parsed =
+            typeof cachedQueryEmails === "string"
+              ? (JSON.parse(cachedQueryEmails) as Email[])
+              : (cachedQueryEmails as unknown as Email[]);
+          emailContext = parsed;
         } else {
-          if (process.env.NODE_ENV !== "production")
-            console.log("Fetching query-filtered emails from Gmail API", q);
           const { emails, total } = await fetchGmailEmails(
             req.session.tokens.access_token!,
             { q, perPage: 100, totalLimit: 500 }
@@ -71,17 +71,13 @@ export async function chatHandler(req: Request, res: Response) {
           ? null
           : await redisClient.get(countScopedKey);
         if (cachedEmails) {
-          const parsed = JSON.parse(cachedEmails) as Email[];
+          const parsed =
+            typeof cachedEmails === "string"
+              ? (JSON.parse(cachedEmails) as Email[])
+              : (cachedEmails as unknown as Email[]);
           if (parsed.length >= desiredCount) {
-            if (process.env.NODE_ENV !== "production")
-              console.log("Using cached emails from Redis");
             emailContext = parsed;
           } else {
-            if (process.env.NODE_ENV !== "production")
-              console.log(
-                "Cached emails less than desired count, refetching recent",
-                desiredCount
-              );
             const { emails, total } = await fetchGmailEmails(
               req.session.tokens.access_token!,
               { perPage: desiredCount, totalLimit: desiredCount }
@@ -97,8 +93,6 @@ export async function chatHandler(req: Request, res: Response) {
             );
           }
         } else {
-          if (process.env.NODE_ENV !== "production")
-            console.log("Fetching fresh emails from Gmail API (recent)");
           const { emails, total } = await fetchGmailEmails(
             req.session.tokens.access_token!,
             { perPage: desiredCount, totalLimit: desiredCount }
@@ -187,9 +181,9 @@ When listing emails, include up to 20 items from the provided context unless the
           },
         ];
 
-        const chunkResp = await groq.chat.completions.create({
+        const chunkResp = await openai.chat.completions.create({
           messages: chunkMessages as any,
-          model: "llama-3.3-70b-versatile",
+          model: process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini",
           temperature: 0.4,
           max_tokens: 400,
         });
@@ -210,9 +204,9 @@ When listing emails, include up to 20 items from the provided context unless the
         },
       ];
 
-      const merged = await groq.chat.completions.create({
+      const merged = await openai.chat.completions.create({
         messages: mergeMessages as any,
-        model: "llama-3.3-70b-versatile",
+        model: process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini",
         temperature: 0.5,
         max_tokens: 800,
       });
@@ -224,9 +218,9 @@ When listing emails, include up to 20 items from the provided context unless the
       emailContext && emailContext.length > LARGE_EMAIL_THRESHOLD
         ? await summarizeInChunks(emailContext, message)
         : (
-            await groq.chat.completions.create({
+            await openai.chat.completions.create({
               messages: messagesForModel,
-              model: "llama-3.3-70b-versatile",
+              model: process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini",
               temperature: 0.7,
               max_tokens: 1024,
             })
@@ -242,7 +236,6 @@ When listing emails, include up to 20 items from the provided context unless the
 
     res.json({ response: assistantMessage, usedGmail });
   } catch (error) {
-    console.error("Chat error:", error);
     const errorMessage =
       error instanceof Error ? error.message : "Failed to process message";
     res.status(500).json({ error: errorMessage });
