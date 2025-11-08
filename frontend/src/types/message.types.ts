@@ -1,0 +1,6 @@
+export interface Message {
+  role: "user" | "assistant";
+  content: string;
+  isError?: boolean;
+  usedGmail?: boolean;
+}
